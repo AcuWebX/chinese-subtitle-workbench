@@ -41,38 +41,35 @@ for segment in data["segments"]:
 if current:
     groups.append(current)
 
-translator = GoogleTranslator(source=data["language"], target="zh-CN")
 cues = []
 for number, words in enumerate(groups, start=1):
     source = " ".join(word["text"] for word in words)
     text = None
-    for attempt in range(3):
+    for source_language in (data.get("language") or "auto", "auto"):
         try:
-            candidate = translator.translate(source)
-            if candidate and "error" not in candidate.lower() and "server" not in candidate.lower():
-                text = wrap(candidate)
-                break
+            translator = GoogleTranslator(source=source_language, target="zh-CN")
         except Exception:
-            pass
-        time.sleep(1.0 + attempt)
+            continue
+        for attempt in range(3):
+            try:
+                candidate = (translator.translate(source) or "").strip()
+                if candidate and "error" not in candidate.lower() and "server" not in candidate.lower():
+                    text = wrap(candidate)
+                    break
+            except Exception:
+                pass
+            time.sleep(1.0 + attempt)
+        if text:
+            break
     if text is None:
-        text = "（对白声）"
+        text = wrap(source)
     cues.append({"start": words[0]["start"], "end": words[-1]["end"], "text": text})
     print(f"Translated {number}/{len(groups)}", flush=True)
     time.sleep(0.35)
 
-# Whisper may stretch a hallucinated phrase over minutes in non-dialogue scenes.
-sound_text = ["嗯……啊……", "啊……嗯……", "嗯……嗯……啊……", "啊……"]
-revised, sound_index = [], 0
-for cue in cues:
-    if cue["end"] - cue["start"] <= 30:
-        revised.append(cue)
-        continue
-    position = cue["start"]
-    while position < cue["end"]:
-        revised.append({"start": position, "end": min(position + 3.2, cue["end"]), "text": sound_text[sound_index % len(sound_text)]})
-        sound_index += 1
-        position += 8.0
+# Keep recognized dialogue intact; do not overwrite long speech with invented
+# sound labels when timestamps are unusual.
+revised = cues
 
 srt, ass = [], [
     "[Script Info]", "ScriptType: v4.00+", "PlayResX: 1920", "PlayResY: 1080", "WrapStyle: 0", "ScaledBorderAndShadow: yes", "",

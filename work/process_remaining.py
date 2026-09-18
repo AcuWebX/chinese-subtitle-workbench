@@ -65,23 +65,34 @@ def dimensions(source):
 
 
 def translate_groups(groups, language):
-    translator = GoogleTranslator(source=language or "auto", target="zh-CN")
     cues = []
     for number, words in enumerate(groups, start=1):
         source = " ".join(word["text"] for word in words)
         translated = None
-        for attempt in range(3):
+        # Recreate the translator for each retry so a transient Google endpoint
+        # failure does not poison the rest of the queue.
+        for source_language in (language or "auto", "auto"):
             try:
-                candidate = translator.translate(source)
-                if candidate and "error" not in candidate.lower() and "server" not in candidate.lower():
-                    translated = wrap(candidate)
-                    break
-            except Exception:
-                pass
-            time.sleep(1 + attempt)
-        cues.append({"start": words[0]["start"], "end": words[-1]["end"], "text": translated or "（对白声）"})
-        note(f"Translated {number}/{len(groups)}")
-        time.sleep(0.35)
+                translator = GoogleTranslator(source=source_language, target="zh-CN")
+            except Exception as error:
+                note(f"Translation setup retry {number}: {type(error).__name__}")
+                continue
+            for attempt in range(3):
+                try:
+                    candidate = (translator.translate(source) or "").strip()
+                    if candidate and "error" not in candidate.lower() and "server" not in candidate.lower():
+                        translated = wrap(candidate)
+                        break
+                except Exception as error:
+                    note(f"Translation retry {number}: {type(error).__name__}")
+                time.sleep(1 + attempt)
+            if translated:
+                break
+        # Never replace recognized speech with a fake sound label. Keeping the
+        # recognized source text is more useful than hiding a translation error.
+        text = translated or wrap(source)
+        cues.append({"start": words[0]["start"], "end": words[-1]["end"], "text": text})
+        note(f"Translated {number}/{len(groups)}" if translated else f"Kept original {number}/{len(groups)}")
     return cues
 
 
@@ -89,6 +100,9 @@ def make_groups(segments):
     groups, current = [], []
     for segment in segments:
         for word in segment.get("words", []):
+            if current and word["start"] - current[-1]["end"] > 0.9:
+                groups.append(current)
+                current = []
             current.append(word)
             duration = word["end"] - current[0]["start"]
             if duration >= 5.5 or (duration >= 3 and re.search(r"[.!?…]$", word["text"])):
@@ -100,17 +114,9 @@ def make_groups(segments):
 
 
 def replace_long_cues(cues):
-    revised, sounds, index = [], ["嗯……啊……", "啊……嗯……", "嗯……嗯……啊……", "啊……"], 0
-    for cue in cues:
-        if cue["end"] - cue["start"] <= 30:
-            revised.append(cue)
-            continue
-        point = cue["start"]
-        while point < cue["end"]:
-            revised.append({"start": point, "end": min(point + 3.2, cue["end"]), "text": sounds[index % len(sounds)]})
-            index += 1
-            point += 8
-    return revised
+    # Long cues are still recognized speech. Do not fabricate moaning labels or
+    # overwrite dialogue just because a segment has unusual timing.
+    return cues
 
 
 def write_subtitles(cues, output_srt, output_ass, width, height):
@@ -144,23 +150,30 @@ for position, source in enumerate(SOURCES, start=1):
     segments, info = model.transcribe(
         str(audio),
         beam_size=5,
+        best_of=5,
+        temperature=0,
         vad_filter=True,
         vad_parameters={
-            "min_silence_duration_ms": 250,
-            "min_speech_duration_ms": 100,
-            "speech_pad_ms": 350,
+            "min_silence_duration_ms": 180,
+            "min_speech_duration_ms": 80,
+            "speech_pad_ms": 500,
         },
-        no_speech_threshold=0.35,
-        log_prob_threshold=-1.0,
+        no_speech_threshold=0.2,
+        log_prob_threshold=-1.5,
+        compression_ratio_threshold=2.6,
         condition_on_previous_text=True,
         word_timestamps=True,
     )
     transcript = []
     for segment in segments:
         words = [{"start": word.start, "end": word.end, "text": word.word.strip()} for word in (segment.words or []) if word.word.strip()]
+        # Word timestamps can be absent for quiet/short speech. Keep the
+        # segment instead of silently dropping a perfectly valid recognition.
+        if not words and segment.text.strip():
+            words = [{"start": segment.start, "end": max(segment.end, segment.start + 0.8), "text": segment.text.strip()}]
         if words:
             transcript.append({"words": words})
-    note(f"Recognized {len(transcript)} segments in {info.language}")
+    note(f"Recognized {len(transcript)} segments in {info.language} ({info.language_probability:.0%} confidence)")
     groups = make_groups(transcript)
     cues = replace_long_cues(translate_groups(groups, info.language))
     srt = OUTPUTS / f"{source.stem}.srt"

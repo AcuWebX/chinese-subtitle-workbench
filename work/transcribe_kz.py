@@ -8,9 +8,14 @@ model = WhisperModel("deepdml/faster-whisper-large-v3-turbo-ct2", device="cpu", 
 segments, info = model.transcribe(
     "work/audio_kz.wav",
     beam_size=5,
+    best_of=5,
+    temperature=0,
     vad_filter=True,
-    vad_parameters={"min_silence_duration_ms": 500},
-    condition_on_previous_text=False,
+    vad_parameters={"min_silence_duration_ms": 180, "min_speech_duration_ms": 80, "speech_pad_ms": 500},
+    no_speech_threshold=0.2,
+    log_prob_threshold=-1.5,
+    compression_ratio_threshold=2.6,
+    condition_on_previous_text=True,
     word_timestamps=True,
 )
 
@@ -23,6 +28,8 @@ for segment in segments:
             for word in (segment.words or [])
             if word.word.strip()
         ]
+        if not words:
+            words = [{"start": segment.start, "end": max(segment.end, segment.start + 0.8), "text": text}]
         rows.append({"start": segment.start, "end": segment.end, "text": text, "words": words})
         print(f"{segment.start:8.2f} --> {segment.end:8.2f}  {text}", flush=True)
 
