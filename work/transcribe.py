@@ -1,0 +1,34 @@
+import json
+from pathlib import Path
+
+from faster_whisper import WhisperModel
+
+
+audio_path = Path("work/audio.wav")
+output_path = Path("work/transcript_ru.json")
+
+model = WhisperModel("deepdml/faster-whisper-large-v3-turbo-ct2", device="cpu", compute_type="int8")
+segments, info = model.transcribe(
+    str(audio_path),
+    language="ru",
+    beam_size=5,
+    vad_filter=True,
+    vad_parameters={"min_silence_duration_ms": 500},
+    condition_on_previous_text=False,
+    word_timestamps=True,
+)
+
+rows = []
+for segment in segments:
+    text = segment.text.strip()
+    if text:
+        words = [
+            {"start": word.start, "end": word.end, "text": word.word.strip()}
+            for word in (segment.words or [])
+            if word.word.strip()
+        ]
+        rows.append({"start": segment.start, "end": segment.end, "text": text, "words": words})
+        print(f"{segment.start:8.2f} --> {segment.end:8.2f}  {text}", flush=True)
+
+output_path.write_text(json.dumps({"language": info.language, "segments": rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+print(f"Wrote {len(rows)} segments to {output_path}")

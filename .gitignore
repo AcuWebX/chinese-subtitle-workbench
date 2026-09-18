@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+work/.venv/
+work/batch/
+work/*.wav
+work/*.log
+work/*.mp4
+work/*.json
+work/*.ass
+outputs/
+web_uploads/
+settings.cmd
+install.log
+data/
+*.zip

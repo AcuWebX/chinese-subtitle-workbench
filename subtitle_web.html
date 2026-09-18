@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico?v=3">
+  <title>中文字幕工作台</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif; background: #111417; color: #eef1f3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    main { width: min(760px, 100%); }
+    h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: 0; }
+    p { color: #9da8b0; margin: 0 0 24px; }
+    .drop { border: 1px dashed #58656e; background: #191e22; min-height: 290px; display: grid; place-items: center; text-align: center; padding: 36px; transition: .18s ease; }
+    .drop.active { border-color: #62c3b1; background: #182b2b; }
+    .drop strong { display: block; font-size: 20px; margin-bottom: 8px; }
+    .drop span { color: #9da8b0; }
+    .actions { display: flex; justify-content: center; gap: 12px; margin-top: 18px; }
+    button { border: 1px solid #62c3b1; background: #62c3b1; color: #10201e; font: inherit; font-weight: 700; padding: 11px 18px; cursor: pointer; }
+    #pickFolder { background: #263c3d; color: #bce9e1; }
+    #cleanup { margin-top: 18px; }
+    @media (max-width: 520px) { .actions { flex-direction: column; align-items: stretch; } }
+    .job { margin-top: 18px; background: #191e22; border-left: 3px solid #62c3b1; padding: 16px; }
+    .job small { color: #9da8b0; display: block; margin-top: 6px; }
+    a { color: #8ed8cb; }
+    input { display: none; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>中文字幕工作台</h1>
+  <p>视频只在本机处理。拖入文件后会自动生成带中文字幕的副本。</p>
+  <section class="drop" id="drop"><div><strong>拖入视频文件</strong><span>或点击选择 MP4、MKV、MOV</span><div class="actions"><button type="button" id="choose">选择视频</button><button type="button" id="pickFolder">选择保存文件夹</button></div><input id="file" type="file" accept="video/*" multiple><small id="folderStatus" style="display:block;color:#9da8b0;margin-top:10px">保存位置：桌面</small></div></section>
+  <section id="jobs"></section>
+  <button type="button" id="cleanup">清理任务缓存</button>
+  <small id="cleanupStatus" style="display:block;color:#9da8b0;margin-top:10px"></small>
+</main>
+<script>
+const drop = document.querySelector('#drop'), file = document.querySelector('#file'), jobs = document.querySelector('#jobs');
+let outputDir = '';
+document.querySelector('#pickFolder').onclick = async () => { const result = await (await fetch('/api/select-folder', {method:'POST'})).json(); if (result.path) { outputDir = result.path; document.querySelector('#folderStatus').textContent = `保存位置：${result.path}`; } };
+document.querySelector('#cleanup').onclick = async () => { const result = await (await fetch('/api/cleanup', {method:'POST'})).json(); document.querySelector('#cleanupStatus').textContent = `已清理 ${result.removed} 个上传缓存，桌面成品未删除`; jobs.innerHTML = ''; };
+document.querySelector('#choose').onclick = () => file.click();
+file.onchange = () => Array.from(file.files).forEach(upload);
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('active'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('active'); }));
+drop.addEventListener('drop', ev => Array.from(ev.dataTransfer.files).forEach(upload));
+async function upload(video) {
+  const card = document.createElement('article'); card.className = 'job'; card.innerHTML = `<b>${escapeHtml(video.name)}</b><small>正在上传...</small>`; jobs.prepend(card);
+  const data = new FormData(); data.append('video', video); if (outputDir) data.append('output_dir', outputDir);
+  const result = await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest(); xhr.open('POST', '/api/upload');
+    xhr.upload.onprogress = ev => { if (ev.lengthComputable) card.querySelector('small').textContent = `正在上传 ${Math.round(ev.loaded / ev.total * 100)}%`; };
+    xhr.onload = () => { try { resolve(JSON.parse(xhr.responseText)); } catch (error) { reject(error); } };
+    xhr.onerror = reject; xhr.send(data);
+  });
+  if (result.error) { card.querySelector('small').textContent = result.error || '上传失败'; return; }
+  const timer = setInterval(async () => { const state = await (await fetch('/api/jobs/' + result.id)).json(); card.querySelector('small').textContent = state.message || state.status; if (state.status === 'done') { clearInterval(timer); card.querySelector('small').innerHTML = `<a href="file://${state.output}">处理完成，打开文件</a>`; } if (state.status === 'error') clearInterval(timer); }, 1500);
+}
+function escapeHtml(value) { return value.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+</script>
+</body>
+</html>
