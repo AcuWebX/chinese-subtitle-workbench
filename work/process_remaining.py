@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -11,9 +12,48 @@ from faster_whisper import WhisperModel
 
 WORK = Path("work/batch")
 OUTPUTS = Path("outputs")
-DESKTOP = Path.home() / "Desktop"
-FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-FFPROBE = shutil.which("ffprobe") or "ffprobe"
+
+
+def desktop_path():
+    for name in ("Desktop", "桌面"):
+        candidate = Path.home() / name
+        if candidate.is_dir():
+            return candidate
+    candidate = Path.home() / "Desktop"
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+DESKTOP = desktop_path()
+
+
+def find_tool(name):
+    found = shutil.which(name)
+    if found:
+        return found
+    # WinGet may install FFmpeg after the current shell's PATH was created.
+    # Search its package directory so a fresh deployment works immediately.
+    roots = [
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages",
+        Path(os.environ.get("ProgramFiles", "")) / "WinGet" / "Packages",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "WinGet" / "Packages",
+        Path("C:/ffmpeg"),
+    ]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            matches = root.rglob(f"{name}.exe")
+        except OSError:
+            continue
+        for candidate in matches:
+            if candidate.is_file() and "ffmpeg" in str(candidate).lower():
+                return str(candidate)
+    return name
+
+
+FFMPEG = find_tool("ffmpeg")
+FFPROBE = find_tool("ffprobe")
 SOURCES = [
 ]
 STATUS = WORK / "status.log"
@@ -28,7 +68,17 @@ def note(message):
 
 def command(args, cwd=None):
     with (WORK / "ffmpeg.log").open("a", encoding="utf-8") as log:
-        subprocess.run(args, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, check=True)
+        try:
+            subprocess.run(args, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, check=True)
+        except FileNotFoundError as error:
+            raise RuntimeError("找不到 FFmpeg。请重新运行 DEPLOY.cmd，或安装 FFmpeg 后重启电脑。") from error
+        except subprocess.CalledProcessError as error:
+            try:
+                tail = (WORK / "ffmpeg.log").read_text(encoding="utf-8", errors="replace")[-800:].strip()
+            except OSError:
+                tail = ""
+            detail = f"\nFFmpeg: {tail}" if tail else ""
+            raise RuntimeError(f"FFmpeg 处理失败（退出码 {error.returncode}）。{detail}") from error
 
 
 def srt_time(value):
@@ -173,6 +223,30 @@ for position, source in enumerate(SOURCES, start=1):
             words = [{"start": segment.start, "end": max(segment.end, segment.start + 0.8), "text": segment.text.strip()}]
         if words:
             transcript.append({"words": words})
+    # Very quiet speech can be rejected by VAD on some computers. Retry once
+    # without VAD only when the first pass found nothing, avoiding false cues
+    # during normal processing while recovering low-volume dialogue.
+    if not transcript:
+        note("No speech found with VAD; retrying quiet-audio recognition")
+        retry_segments, retry_info = model.transcribe(
+            str(audio),
+            beam_size=5,
+            best_of=5,
+            temperature=0,
+            vad_filter=False,
+            no_speech_threshold=0.15,
+            log_prob_threshold=-1.8,
+            compression_ratio_threshold=2.6,
+            condition_on_previous_text=False,
+            word_timestamps=True,
+        )
+        for segment in retry_segments:
+            words = [{"start": word.start, "end": word.end, "text": word.word.strip()} for word in (segment.words or []) if word.word.strip()]
+            if not words and segment.text.strip():
+                words = [{"start": segment.start, "end": max(segment.end, segment.start + 0.8), "text": segment.text.strip()}]
+            if words:
+                transcript.append({"words": words})
+        info = retry_info
     note(f"Recognized {len(transcript)} segments in {info.language} ({info.language_probability:.0%} confidence)")
     groups = make_groups(transcript)
     cues = replace_long_cues(translate_groups(groups, info.language))
